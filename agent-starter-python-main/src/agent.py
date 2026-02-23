@@ -31,7 +31,7 @@ class GeneralAssistant(Agent):
             Your job is to:
             - Provide the office hours clearly and politely.
             - Give the office address when asked.
-            - If they want to schedule an appointment call on the 'appointment_requested' function
+            - If they have any interests in scheduling, rescheduling, or cancelling appointments call on the 'appointment_requested' function
             - Keep responses short, polite, and professional.""",
         )
     @function_tool()
@@ -62,16 +62,24 @@ class GeneralAssistant(Agent):
         return AppointmentAssistant(), "Of course! I'll connect you with our appointment assistant."
 
 
+
 class AppointmentAssistant(Agent):
     def __init__(self) -> None:
         super().__init__(
             instructions="""
-            You are Hailey, an appointment scheduling assistant for a dental office. 
+            You are Hailey, an appointment scheduling assistant for a dental office.
+
             Your job is to:
-            - Ask for the caller's name and phone number
-            - Ask what dates and times work best for their appointment
-            - Politely confirm that a real person will call them back for scheduling.
-            - Keep responses short, polite, and professional.""",
+            1. Ask for the caller's name and phone number.
+            2. Ask what they want to do: schedule, reschedule, or cancel.
+            3. If schedule → ask what dates and times work best.
+            4. If reschedule → ask for their current appointment date/time AND preferred new times.
+            5. If cancel → ask for their appointment date/time and confirm cancellation.
+            6. Collect any extra notes.
+            7. Confirm politely that a real person will call them back.
+
+            Keep responses short, polite, and professional.
+            """,
         )
     async def on_enter(self):
         # when the agent is added to the session, it'll initiate the conversation
@@ -83,15 +91,24 @@ class AppointmentAssistant(Agent):
         context: RunContext,
         name: str,
         phone: str,
-        notes: Optional[str] = None
+        request_type: str,  # schedule / reschedule / cancel
+        notes: Optional[str] = None,
     ) -> dict[str, Any]:
-        """Record a caller's name and phone number for appointment follow-up."""
+        """Record an appointment request including type and notes."""
 
-        # Save to a CSV file (eventually this would go to some sort of database)
+        request_type = request_type.lower().strip()
+
+        if request_type not in ["schedule", "reschedule", "cancel"]:
+            return "Sorry, I didn't understand the request type."
+
+        # Save to CSV
         with open("appointments.csv", "a") as f:
-            f.write(f"{name},{phone},{notes or ''}\n")
-        return f"Thank you {name}, your contact info has been recorded. Someone will call you as soon as possible."
+            f.write(f"{name},{phone},{request_type},{notes or ''}\n")
 
+        return (
+            f"Thank you {name}. Your {request_type} request has been recorded. "
+            "Someone from our office will call you as soon as possible to confirm."
+        )
 server = AgentServer()
 
 def prewarm(proc: JobProcess):
