@@ -17,21 +17,21 @@ from livekit.agents import (
 from livekit.plugins import assemblyai, elevenlabs, openai
 from livekit.plugins import noise_cancellation, silero
 from livekit.plugins.turn_detector.multilingual import MultilingualModel
+from opentelemetry import context
 
 logger = logging.getLogger("agent")
 
 load_dotenv(".env.local")
 
 
-class Assistant(Agent):
+class GeneralAssistant(Agent):
     def __init__(self) -> None:
         super().__init__(
             instructions="""You are Paige, a virtual dental office assistant. 
             Your job is to:
             - Provide the office hours clearly and politely.
             - Give the office address when asked.
-            - Ask for the caller's name and phone number if they want to schedule an appointment.
-            - Politely confirm that a real person will call them back for scheduling.
+            - If they want to schedule an appointment call on the 'appointment_requested' function
             - Keep responses short, polite, and professional.""",
         )
     @function_tool()
@@ -41,6 +41,7 @@ class Assistant(Agent):
     ) -> dict[str, Any]:
         """Get the office hours of the dental office."""
         return "Our office hours are Monday to Friday, 9 AM to 5 PM."
+    
     @function_tool()
     async def get_office_address(
         self, 
@@ -49,7 +50,33 @@ class Assistant(Agent):
         """Return the dental office address."""
         return "Our office is located at 123 Four Street, FiveField, California."
     
-    #this function would be moved to be used for the AppointmentAgent class.
+    #this function will be used to call the AppointmentAssistant class.
+    @function_tool()
+    async def appointment_requested(
+        self,
+        _context: RunContext
+    ) -> str:
+        """Send caller for appointment making with other agent."""
+        
+        logger.info("switching to the appointment assistant")
+        return AppointmentAssistant(), "Of course! I'll connect you with our appointment assistant."
+
+
+class AppointmentAssistant(Agent):
+    def __init__(self) -> None:
+        super().__init__(
+            instructions="""
+            You are Hailey, an appointment scheduling assistant for a dental office. 
+            Your job is to:
+            - Ask for the caller's name and phone number
+            - Ask what dates and times work best for their appointment
+            - Politely confirm that a real person will call them back for scheduling.
+            - Keep responses short, polite, and professional.""",
+        )
+    async def on_enter(self):
+        # when the agent is added to the session, it'll initiate the conversation
+        self.session.generate_reply()
+
     @function_tool()
     async def record_appointment_request(
         self,
@@ -65,9 +92,7 @@ class Assistant(Agent):
             f.write(f"{name},{phone},{notes or ''}\n")
         return f"Thank you {name}, your contact info has been recorded. Someone will call you as soon as possible."
 
-
 server = AgentServer()
-
 
 def prewarm(proc: JobProcess):
     proc.userdata["vad"] = silero.VAD.load()
@@ -85,24 +110,22 @@ async def my_agent(ctx: JobContext):
 
     # Set up a voice AI pipeline using OpenAI, AssemblyAI, and the LiveKit turn detector
     session = AgentSession(
-        # Speech-to-text (STT) is your agent's ears, turning the user's speech into text that the LLM can understand
+        # Speech-to-text: turning the user's speech into text that the LLM can understand
         stt=assemblyai.STT(),
-        # A Large Language Model (LLM) is your agent's brain, processing user input and generating a response
+        # Large Language Model: processing user input and generating a response
         llm=openai.LLM(model="gpt-4o-mini"),
-        # Text-to-speech (TTS) is your agent's voice, turning the LLM's text into speech that the user can hear
+        # Text-to-speech: turning the LLM's text into speech that the user can hear
         tts=elevenlabs.TTS(),
         # VAD and turn detection are used to determine when the user is speaking and when the agent should respond
-        # See more at https://docs.livekit.io/agents/build/turns
         turn_detection=MultilingualModel(),
         vad=ctx.proc.userdata["vad"],
         # allow the LLM to generate a response while waiting for the end of turn
-        # See more at https://docs.livekit.io/agents/build/audio/#preemptive-generation
         preemptive_generation=True,
     )
 
-    # Start the session, which initializes the voice pipeline and warms up the models
+    # Start the session
     await session.start(
-        agent=Assistant(),
+        agent=GeneralAssistant(),
         room=ctx.room,
         room_options=room_io.RoomOptions(
             audio_input=room_io.AudioInputOptions(
