@@ -73,9 +73,9 @@ class AppointmentAssistant(Agent):
             3. Ask what they want to do: schedule, reschedule, or cancel.
             4. If schedule → ask what dates and times work best.
             5. If reschedule → ask for their current appointment date/time AND preferred new times.
-            6. If cancel → ask for their appointment date/time and confirm cancellation.
+            6. If cancel → ask for the appointment date/time. if they do not know, write it in as notes and let them know someone will call them back.
             7. Collect any extra notes.
-            8. Confirm politely that a real person will call them back.
+            8. Confirm politely that a real person will call them back to confirm their request.
 
             Keep responses short, polite, and professional.
             """,
