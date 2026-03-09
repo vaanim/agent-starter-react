@@ -1,4 +1,7 @@
+import json
 import logging
+import os
+from datetime import datetime
 from typing import Any, Optional
 
 from dotenv import load_dotenv
@@ -23,6 +26,10 @@ logger = logging.getLogger("agent")
 
 load_dotenv(".env.local")
 
+N8N_WEBHOOK_URL = os.getenv(
+    "N8N_WEBHOOK_URL",
+    "http://localhost:5678/webhook/appointment-agent"
+)
 
 class GeneralAssistant(Agent):
     def __init__(self) -> None:
@@ -117,7 +124,17 @@ def prewarm(proc: JobProcess):
 server.setup_fnc = prewarm
 
 
-@server.rtc_session(agent_name="my-agent")
+async def on_session_end(ctx: JobContext) -> None:
+    report = ctx.make_session_report()
+    os.makedirs("transcripts", exist_ok=True)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    filename = f"transcripts/{ctx.room.name}_{timestamp}.json"
+    with open(filename, "w") as f:
+        json.dump(report.to_dict(), f, indent=2)
+    logger.info(f"Transcript saved to {filename}")
+
+
+@server.rtc_session(agent_name="my-agent", on_session_end=on_session_end)
 async def my_agent(ctx: JobContext):
     # Logging setup
     ctx.log_context_fields = {
