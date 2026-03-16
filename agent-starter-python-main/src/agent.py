@@ -27,7 +27,7 @@ import requests
 logger = logging.getLogger("agent")
 
 load_dotenv(".env.local")
-
+session_id = ''
 N8N_URL = "https://railway.assigncorp.com/webhook/appointment-agent"
 
 def send_to_n8n(command: str, query: str, trace_id: str | None = None):
@@ -95,15 +95,21 @@ class AppointmentAssistant(Agent):
             instructions="""
             You are Hailey, an appointment scheduling assistant for a dental office.
 
-            If a caller wants to:
-            • schedule an appointment
-            • request records
-            • ask for a prescription refill
-            • request billing help
-            • ask for a callback
-            You must create a task using the create_task tool.
-            The query format should be:
+            When a caller wants to schedule, reschedule, or cancel an appointment (or any other request),
+            collect their information ONE question at a time in this order:
+            1. Ask for their full name.
+            2. Ask for their phone number.
+            3. Ask for their preferred date.
+            4. Ask for their preferred time.
+
+            Wait for the caller to answer each question before asking the next one.
+            Do NOT ask multiple questions in the same response.
+
+            Once you have all four pieces of information, call the create_task tool with the query formatted as:
                 Name, Phone, Request, Preferred date, Preferred time
+
+            After the task is recorded, ask the caller if there is anything else you can help them with.
+            If they say no or indicate they are done, say a polite goodbye and call the end_call tool.
 
             Keep responses short, polite, and professional.
             """,
@@ -137,6 +143,14 @@ class AppointmentAssistant(Agent):
             "Someone from our office will call you as soon as possible to confirm."
         )
     @function_tool()
+    async def end_call(
+        self,
+        context: RunContext,
+    ) -> None:
+        """End the call after the caller has no further needs."""
+        await self.session.aclose()
+
+    @function_tool()
     async def create_task(
         self,
         context: RunContext,
@@ -148,7 +162,7 @@ class AppointmentAssistant(Agent):
         result = send_to_n8n(
             command="create_task",
             query=query,
-            trace_id=context.session.id
+            trace_id=session_id
         )
         if isinstance(result, dict) and result.get("status") == "success":
             return "Your request has been sent to our office team. Someone will contact you shortly."
@@ -162,6 +176,7 @@ def prewarm(proc: JobProcess):
 
 
 server.setup_fnc = prewarm
+
 
 
 async def on_session_end(ctx: JobContext) -> None:
@@ -180,7 +195,8 @@ async def my_agent(ctx: JobContext):
     ctx.log_context_fields = {
         "room": ctx.room.name,
     }
-
+    global session_id
+    session_id = ctx.room.name
     # Set up a voice AI pipeline using OpenAI, AssemblyAI, and the LiveKit turn detector
     session = AgentSession(
         # Speech-to-text: turning the user's speech into text that the LLM can understand
