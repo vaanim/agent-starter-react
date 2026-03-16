@@ -22,14 +22,35 @@ from livekit.plugins import noise_cancellation, silero
 from livekit.plugins.turn_detector.multilingual import MultilingualModel
 from opentelemetry import context
 
+import requests
+
 logger = logging.getLogger("agent")
 
 load_dotenv(".env.local")
 
-N8N_WEBHOOK_URL = os.getenv(
-    "N8N_WEBHOOK_URL",
-    "http://localhost:5678/webhook/appointment-agent"
-)
+N8N_URL = "https://railway.assigncorp.com/webhook/appointment-agent"
+
+def send_to_n8n(command: str, query: str, trace_id: str | None = None):
+
+    payload = {
+        "command": command,
+        "query": query
+    }
+    if trace_id:
+        payload["trace_id"] = trace_id
+    try:
+        response = requests.post(
+            N8N_URL,
+            json=payload,
+            headers={"Content-Type": "application/json"},
+            timeout=20
+        )
+        response.raise_for_status()
+
+        return response.json()
+    except Exception as e:
+        logger.error(f"N8N error: {e}")
+        return {"status": "error", "message": "Unable to create task right now"}
 
 class GeneralAssistant(Agent):
     def __init__(self) -> None:
@@ -74,15 +95,15 @@ class AppointmentAssistant(Agent):
             instructions="""
             You are Hailey, an appointment scheduling assistant for a dental office.
 
-            Your job is to:
-            1. Ask for the caller's first and last name.
-            2. Ask for a good phone number to call back.
-            3. Ask what they want to do: schedule, reschedule, or cancel.
-            4. If schedule → ask what dates and times work best.
-            5. If reschedule → ask for their current appointment date/time AND preferred new times.
-            6. If cancel → ask for the appointment date/time. if they do not know, write it in as notes and let them know someone will call them back.
-            7. Collect any extra notes.
-            8. Confirm politely that a real person will call them back to confirm their request.
+            If a caller wants to:
+            • schedule an appointment
+            • request records
+            • ask for a prescription refill
+            • request billing help
+            • ask for a callback
+            You must create a task using the create_task tool.
+            The query format should be:
+                Name, Phone, Request, Preferred date, Preferred time
 
             Keep responses short, polite, and professional.
             """,
@@ -115,6 +136,25 @@ class AppointmentAssistant(Agent):
             f"Thank you {name}. Your {request_type} request has been recorded. "
             "Someone from our office will call you as soon as possible to confirm."
         )
+    @function_tool()
+    async def create_task(
+        self,
+        context: RunContext,
+        query: str
+    ) -> str:
+        """
+        Create a CRM task from a patient request.
+        """
+        result = send_to_n8n(
+            command="create_task",
+            query=query,
+            trace_id=context.session.id
+        )
+        if isinstance(result, dict) and result.get("status") == "success":
+            return "Your request has been sent to our office team. Someone will contact you shortly."
+
+        return "I've recorded your request and our staff will follow up soon."
+        
 server = AgentServer()
 
 def prewarm(proc: JobProcess):
