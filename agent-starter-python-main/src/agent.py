@@ -30,12 +30,62 @@ load_dotenv(".env.local")
 session_id = ''
 N8N_URL = "https://railway.assigncorp.com/webhook/appointment-agent"
 
-def send_to_n8n(command: str, query: str, trace_id: str | None = None):
+# HELPER METHODS #
 
-    payload = {
-        "command": command,
-        "query": query
+
+
+
+# extract conversation history from the session report to send to n8n and save locally as a transcript
+def extract_conversation(report_dict):
+    messages = []
+
+    items = report_dict.get("chat_history", {}).get("items", [])
+
+    for item in items:
+        if item.get("type") == "message":
+            role = item.get("role")
+            content = " ".join(item.get("content", []))
+            timestamp = item.get("created_at")
+
+            readable_time = datetime.fromtimestamp(timestamp).strftime("%H:%M:%S")
+
+            messages.append({
+                "time": readable_time,
+                "role": role,
+                "message": content
+            })
+
+    return messages
+
+def build_call_metadata(conversation):
+    full_text = " ".join([msg["message"] for msg in conversation]).lower()
+
+    return {
+        "intent": "appointment_request" if "appointment" in full_text else "unknown",
+        "has_phone": any(char.isdigit() for char in full_text),
+        "message_count": len(conversation)
     }
+
+def send_to_n8n(
+    command: str,
+    query: str | None = None,
+    trace_id: str | None = None,
+    extra: dict | None = None
+):
+    payload = {
+        "message": {
+            "type": command
+}
+    }
+    # Put query where n8n expects it
+    if query is not None:
+        payload["query"] = query
+
+    # Put everything else inside body
+    if extra:
+        payload.update(extra)
+
+    # Get trace_id
     if trace_id:
         payload["trace_id"] = trace_id
     try:
@@ -46,21 +96,34 @@ def send_to_n8n(command: str, query: str, trace_id: str | None = None):
             timeout=20
         )
         response.raise_for_status()
-
         return response.json()
     except Exception as e:
         logger.error(f"N8N error: {e}")
-        return {"status": "error", "message": "Unable to create task right now"}
+        return {"status": "error", "message": "Request failed"}
+
+
+# END HELPER METHODS #
+
 
 class GeneralAssistant(Agent):
     def __init__(self) -> None:
         super().__init__(
-            instructions="""You are Paige, a virtual dental office assistant. 
+            instructions="""
+            You are Paige.
+            ##Your role
+            You are a front-desk specialist at an urgent care center.
             Your job is to:
             - Provide the office hours clearly and politely.
             - Give the office address when asked.
             - If they have any interests in scheduling, rescheduling, or cancelling appointments call on the 'appointment_requested' function
-            - Keep responses short, polite, and professional.""",
+            - Keep responses short, polite, and professional.
+            ## Safety and Communication
+
+            - For emergencies: direct to 911/ER immediately and document
+            - Use empathetic, clear language; provide realistic timeframes
+            - If no further requests received → politely `end call`
+
+""",
         )
     @function_tool()
     async def get_office_hours(
@@ -96,11 +159,10 @@ class AppointmentAssistant(Agent):
             You are Hailey, an appointment scheduling assistant for a dental office.
 
             When a caller wants to schedule, reschedule, or cancel an appointment (or any other request),
-            collect their information ONE question at a time in this order:
+            collect their information in this order:
             1. Ask for their full name.
             2. Ask for their phone number.
-            3. Ask for their preferred date.
-            4. Ask for their preferred time.
+            3. Ask for their preferred date and time (could be a range).
 
             Wait for the caller to answer each question before asking the next one.
             Do NOT ask multiple questions in the same response.
@@ -134,14 +196,11 @@ class AppointmentAssistant(Agent):
         if request_type not in ["schedule", "reschedule", "cancel"]:
             return "Sorry, I didn't understand the request type."
 
-        # Save to CSV
-        with open("appointments.csv", "a") as f:
-            f.write(f"{name},{phone},{request_type},{notes or ''}\n")
-
         return (
             f"Thank you {name}. Your {request_type} request has been recorded. "
             "Someone from our office will call you as soon as possible to confirm."
         )
+    
     @function_tool()
     async def end_call(
         self,
@@ -174,22 +233,37 @@ server = AgentServer()
 def prewarm(proc: JobProcess):
     proc.userdata["vad"] = silero.VAD.load()
 
-
 server.setup_fnc = prewarm
-
-
 
 async def on_session_end(ctx: JobContext) -> None:
     report = ctx.make_session_report()
+    report_dict = report.to_dict()
+
+    # Extract clean conversation
+    clean_conversation = extract_conversation(report_dict)
+
+    # Save locally (raw)
     os.makedirs("transcripts", exist_ok=True)
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    timestamp = datetime.now().strftime("%m_%d_%Y_%H%M")
     filename = f"transcripts/{ctx.room.name}_{timestamp}.json"
+
     with open(filename, "w") as f:
-        json.dump(report.to_dict(), f, indent=2)
+        json.dump(report_dict, f, indent=2)
+
     logger.info(f"Transcript saved to {filename}")
 
+    send_to_n8n(
+    command="end_of_call_report",
+    trace_id=ctx.room.name,
+    extra={
+        "conversation": clean_conversation,
+        "metadata": build_call_metadata(clean_conversation),
+        "raw_transcript": report_dict
+    }
+)
 
 @server.rtc_session(agent_name="my-agent", on_session_end=on_session_end)
+
 async def my_agent(ctx: JobContext):
     # Logging setup
     ctx.log_context_fields = {
@@ -230,7 +304,6 @@ async def my_agent(ctx: JobContext):
 
     # Join the room and connect to the user
     await ctx.connect()
-
 
 if __name__ == "__main__":
     cli.run_app(server)
