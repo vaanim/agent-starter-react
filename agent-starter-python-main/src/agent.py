@@ -27,18 +27,20 @@ import requests
 logger = logging.getLogger("agent")
 
 load_dotenv(".env.local")
+
+# GLOBALS #
 session_id = ''
-N8N_URL = "https://railway.assigncorp.com/webhook/appointment-agent"
+session_data_store = {}
+
+N8N_URL = "https://railway.assigncorp.com/webhook/788688e1-1b30-4696-a412-f207ae52e708"
+#personal n8n_url = "https://railway.assigncorp.com/webhook/appointment-agent"
+# using a different n8n workflow now!
 
 # HELPER METHODS #
-
-
-
 
 # extract conversation history from the session report to send to n8n and save locally as a transcript
 def extract_conversation(report_dict):
     messages = []
-
     items = report_dict.get("chat_history", {}).get("items", [])
 
     for item in items:
@@ -57,6 +59,7 @@ def extract_conversation(report_dict):
 
     return messages
 
+#currently not in use
 def build_call_metadata(conversation):
     full_text = " ".join([msg["message"] for msg in conversation]).lower()
 
@@ -69,25 +72,16 @@ def build_call_metadata(conversation):
 def send_to_n8n(
     command: str,
     query: str | None = None,
-    trace_id: str | None = None,
-    extra: dict | None = None
 ):
+    global session_data_store
+
     payload = {
-        "message": {
-            "type": command
-}
+        "command": command,
+        "query": query or "",
+        "sessionid": session_id,
+        "session_data": session_data_store or {}
     }
-    # Put query where n8n expects it
-    if query is not None:
-        payload["query"] = query
 
-    # Put everything else inside body
-    if extra:
-        payload.update(extra)
-
-    # Get trace_id
-    if trace_id:
-        payload["trace_id"] = trace_id
     try:
         response = requests.post(
             N8N_URL,
@@ -95,44 +89,83 @@ def send_to_n8n(
             headers={"Content-Type": "application/json"},
             timeout=20
         )
+
         response.raise_for_status()
-        return response.json()
+        data = response.json()
+
+        # persist session_data from n8n
+        if isinstance(data, dict) and "session_data" in data:
+            session_data_store = data["session_data"]
+
+        return data
+
     except Exception as e:
         logger.error(f"N8N error: {e}")
         return {"status": "error", "message": "Request failed"}
 
-
 # END HELPER METHODS #
 
+#SINGLE AGENT IMPLEMENTATION
 
-class GeneralAssistant(Agent):
+class DentalAssistant(Agent):
     def __init__(self) -> None:
         super().__init__(
             instructions="""
-            You are Paige.
-            ##Your role
-            You are a front-desk specialist at an urgent care center.
-            Your job is to:
-            - Provide the office hours clearly and politely.
-            - Give the office address when asked.
-            - If they have any interests in scheduling, rescheduling, or cancelling appointments call on the 'appointment_requested' function
-            - Keep responses short, polite, and professional.
-            ## Safety and Communication
+            You are Paige, a front desk assistant for a dental office.
 
-            - For emergencies: direct to 911/ER immediately and document
-            - Use empathetic, clear language; provide realistic timeframes
-            - If no further requests received → politely `end call`
+            ## Responsibilities
+            - Help schedule, reschedule, and cancel appointments
+            - Answer basic office questions
+            - Guide the user step-by-step to gather missing info
 
+            ## Behavior
+            - Be polite, short, and professional
+            - Ask ONE question at a time
+            - Do NOT assume missing info
+
+            ## Tool Usage
+            - get_availability → when user asks for times
+            - book_appointment → when user confirms a slot
+            - create_task → fallback if unclear
+            - cancel_appointment / reschedule_appointment → when requested
+
+            Always rely on tool responses. Never make up availability.
+
+            ## Ending
+            If user is done → say goodbye and call end_call
 """,
-        )
+    )
+        
+       # MAIN TOOLS 
     @function_tool()
-    async def get_office_hours(
-        self,
-        context: RunContext,
-    ) -> dict[str, Any]:
+    async def get_availability(self, context: RunContext, query: str) -> str:
         """Get the office hours of the dental office."""
-        return "Our office hours are Monday to Friday, 9 AM to 5 PM."
-    
+        result = send_to_n8n("get_availability", query)
+        return result.get("result", "Sorry, I couldn't retrieve the availability right now.")
+    @function_tool()
+    async def book_appointment(self, context: RunContext, query: str) -> str:
+        result = send_to_n8n("book_appointment", query)
+        return result.get("result", "I couldn't complete the booking.")
+
+    @function_tool()
+    async def cancel_appointment(self, context: RunContext, query: str) -> str:
+        result = send_to_n8n("cancel_appointment", query)
+        return result.get("result", "Unable to cancel appointment.")
+
+    @function_tool()
+    async def reschedule_appointment(self, context: RunContext, query: str) -> str:
+        result = send_to_n8n("reschedule_appointment", query)
+        return result.get("result", "Unable to reschedule appointment.")
+
+    @function_tool()
+    async def create_task(self, context: RunContext, query: str) -> str:
+        result = send_to_n8n("create_task", query)
+        return result.get("result", "I've recorded your request. Our team will follow up.")
+
+    @function_tool()
+    async def end_call(self, context: RunContext) -> None:
+        await self.session.aclose()
+
     @function_tool()
     async def get_office_address(
         self, 
@@ -141,93 +174,7 @@ class GeneralAssistant(Agent):
         """Return the dental office address."""
         return "Our office is located at 123 Four Street, FiveField, California."
     
-    #this function will be used to call the AppointmentAssistant class.
-    @function_tool()
-    async def appointment_requested(
-        self,
-        _context: RunContext
-    ) -> str:
-        """Send caller for appointment making with other agent."""
-        
-        logger.info("switching to the appointment assistant")
-        return AppointmentAssistant(), "Of course! I'll connect you with our appointment assistant."
-
-class AppointmentAssistant(Agent):
-    def __init__(self) -> None:
-        super().__init__(
-            instructions="""
-            You are Hailey, an appointment scheduling assistant for a dental office.
-
-            When a caller wants to schedule, reschedule, or cancel an appointment (or any other request),
-            collect their information in this order:
-            1. Ask for their full name.
-            2. Ask for their phone number.
-            3. Ask for their preferred date and time (could be a range).
-
-            Wait for the caller to answer each question before asking the next one.
-            Do NOT ask multiple questions in the same response.
-
-            Once you have all four pieces of information, call the create_task tool with the query formatted as:
-                Name, Phone, Request, Preferred date, Preferred time
-
-            After the task is recorded, ask the caller if there is anything else you can help them with.
-            If they say no or indicate they are done, say a polite goodbye and call the end_call tool.
-
-            Keep responses short, polite, and professional.
-            """,
-        )
-    async def on_enter(self):
-        # when the agent is added to the session, it'll initiate the conversation
-        self.session.generate_reply()
-
-    @function_tool()
-    async def record_appointment_request(
-        self,
-        context: RunContext,
-        name: str,
-        phone: str,
-        request_type: str,  # schedule / reschedule / cancel
-        notes: Optional[str] = None,
-    ) -> dict[str, Any]:
-        """Record an appointment request including type and notes."""
-
-        request_type = request_type.lower().strip()
-
-        if request_type not in ["schedule", "reschedule", "cancel"]:
-            return "Sorry, I didn't understand the request type."
-
-        return (
-            f"Thank you {name}. Your {request_type} request has been recorded. "
-            "Someone from our office will call you as soon as possible to confirm."
-        )
-    
-    @function_tool()
-    async def end_call(
-        self,
-        context: RunContext,
-    ) -> None:
-        """End the call after the caller has no further needs."""
-        await self.session.aclose()
-
-    @function_tool()
-    async def create_task(
-        self,
-        context: RunContext,
-        query: str
-    ) -> str:
-        """
-        Create a CRM task from a patient request.
-        """
-        result = send_to_n8n(
-            command="create_task",
-            query=query,
-            trace_id=session_id
-        )
-        if isinstance(result, dict) and result.get("status") == "success":
-            return "Your request has been sent to our office team. Someone will contact you shortly."
-
-        return "I've recorded your request and our staff will follow up soon."
-        
+# SERVER SETUP     
 server = AgentServer()
 
 def prewarm(proc: JobProcess):
@@ -238,11 +185,9 @@ server.setup_fnc = prewarm
 async def on_session_end(ctx: JobContext) -> None:
     report = ctx.make_session_report()
     report_dict = report.to_dict()
-
-    # Extract clean conversation
+    #have to decide what im going to do with the clean_conversation data, where it gets sent.
     clean_conversation = extract_conversation(report_dict)
 
-    # Save locally (raw)
     os.makedirs("transcripts", exist_ok=True)
     timestamp = datetime.now().strftime("%m_%d_%Y_%H%M")
     filename = f"transcripts/{ctx.room.name}_{timestamp}.json"
@@ -253,42 +198,30 @@ async def on_session_end(ctx: JobContext) -> None:
     logger.info(f"Transcript saved to {filename}")
 
     send_to_n8n(
-    command="end_of_call_report",
-    trace_id=ctx.room.name,
-    extra={
-        "conversation": clean_conversation,
-        "metadata": build_call_metadata(clean_conversation),
-        "raw_transcript": report_dict
-    }
-)
+        command="end-of-call-report",
+        query="Call ended"
+    )
 
 @server.rtc_session(agent_name="my-agent", on_session_end=on_session_end)
 
 async def my_agent(ctx: JobContext):
-    # Logging setup
-    ctx.log_context_fields = {
-        "room": ctx.room.name,
-    }
-    global session_id
+    global session_id, session_data_store
+
     session_id = ctx.room.name
-    # Set up a voice AI pipeline using OpenAI, AssemblyAI, and the LiveKit turn detector
+    session_data_store = {}  # reset per call
+
     session = AgentSession(
-        # Speech-to-text: turning the user's speech into text that the LLM can understand
         stt=assemblyai.STT(),
-        # Large Language Model: processing user input and generating a response
         llm=openai.LLM(model="gpt-4o-mini"),
-        # Text-to-speech: turning the LLM's text into speech that the user can hear
         tts=elevenlabs.TTS(),
-        # VAD and turn detection are used to determine when the user is speaking and when the agent should respond
         turn_detection=MultilingualModel(),
         vad=ctx.proc.userdata["vad"],
-        # allow the LLM to generate a response while waiting for the end of turn
         preemptive_generation=True,
     )
 
     # Start the session
     await session.start(
-        agent=GeneralAssistant(),
+        agent=DentalAssistant(),
         room=ctx.room,
         room_options=room_io.RoomOptions(
             audio_input=room_io.AudioInputOptions(
