@@ -32,7 +32,7 @@ load_dotenv(".env.local")
 session_id = ''
 session_data_store = {}
 
-N8N_URL = "https://railway.assigncorp.com/webhook/788688e1-1b30-4696-a412-f207ae52e708"
+N8N_URL = "https://railway.assigncorp.com/webhook-test/788688e1-1b30-4696-a412-f207ae52e708"
 #personal n8n_url = "https://railway.assigncorp.com/webhook/appointment-agent"
 # using a different n8n workflow now!
 
@@ -96,7 +96,7 @@ def send_to_n8n(
         # persist session_data from n8n
         if isinstance(data, dict) and "session_data" in data:
             session_data_store = data["session_data"]
-
+        print(data)
         return data
 
     except Exception as e:
@@ -131,17 +131,27 @@ class DentalAssistant(Agent):
 
             Always rely on tool responses. Never make up availability.
 
+            ## Getting Availability
+            - make sure to include the reason in for the appointment in the query when checking availability
+            - for example: cleaning, toothache, cavity, extraction, whitening, etc.
+
             ## Ending
             If user is done → say goodbye and call end_call
 """,
     )
         
        # MAIN TOOLS 
+    
     @function_tool()
     async def get_availability(self, context: RunContext, query: str) -> str:
         """Get the office hours of the dental office."""
         result = send_to_n8n("get_availability", query)
-        return result.get("result", "Sorry, I couldn't retrieve the availability right now.")
+        try:
+            return result["results"][0]["result"]
+        except Exception as e:
+            logger.error(f"Error retrieving availability: {e}")
+            return "I'm sorry, I couldn't retrieve availability right now."
+    
     @function_tool()
     async def book_appointment(self, context: RunContext, query: str) -> str:
         result = send_to_n8n("book_appointment", query)
@@ -184,16 +194,14 @@ server.setup_fnc = prewarm
 
 async def on_session_end(ctx: JobContext) -> None:
     report = ctx.make_session_report()
-    report_dict = report.to_dict()
-    #have to decide what im going to do with the clean_conversation data, where it gets sent.
-    clean_conversation = extract_conversation(report_dict)
+    clean_conversation = extract_conversation(report.to_dict())
 
     os.makedirs("transcripts", exist_ok=True)
     timestamp = datetime.now().strftime("%m_%d_%Y_%H%M")
     filename = f"transcripts/{ctx.room.name}_{timestamp}.json"
 
     with open(filename, "w") as f:
-        json.dump(report_dict, f, indent=2)
+        json.dump(clean_conversation, f, indent=2)
 
     logger.info(f"Transcript saved to {filename}")
 
