@@ -198,7 +198,7 @@ async def on_session_end(ctx: JobContext) -> None:
 
     os.makedirs("transcripts", exist_ok=True)
     timestamp = datetime.now().strftime("%m_%d_%Y_%H%M")
-    filename = f"transcripts/{ctx.room.name}_{timestamp}.json"
+    filename = f"transcripts/session_{timestamp}.json"
 
     with open(filename, "w") as f:
         json.dump(clean_conversation, f, indent=2)
