@@ -32,9 +32,9 @@ load_dotenv(".env.local")
 session_id = ''
 session_data_store = {}
 
-N8N_URL = "https://railway.assigncorp.com/webhook-test/788688e1-1b30-4696-a412-f207ae52e708"
+N8N_URL = "https://railway.assigncorp.com/webhook/788688e1-1b30-4696-a412-f207ae52e708"
 #personal n8n_url = "https://railway.assigncorp.com/webhook/appointment-agent"
-# using a different n8n workflow now!
+# using a different n8n workflow
 
 # HELPER METHODS #
 
@@ -113,35 +113,100 @@ class DentalAssistant(Agent):
             instructions="""
             You are Paige, a front desk assistant for a dental office.
 
-            ## Responsibilities
+            ## Core responsibilities
             - Help schedule, reschedule, and cancel appointments
             - Answer basic office questions
             - Guide the user step-by-step to gather missing info
 
-            ## Behavior
+            ## Conversation Stlyle
             - Be polite, short, and professional
             - Ask ONE question at a time
             - Do NOT assume missing info
+            
+            ## System Architecture
+            You have only ONE tool: 'run_command'
+            This tool sends a command and query to an external system (n8n) that handles all logic, data retrieval, and state management.
 
-            ## Tool Usage
-            - get_availability → when user asks for times
-            - book_appointment → when user confirms a slot
-            - create_task → fallback if unclear
-            - cancel_appointment / reschedule_appointment → when requested
+            You must:
+            - Choose the correct 'command'
+            - Provide a clear 'query' (user request and collected context)
 
-            Always rely on tool responses. Never make up availability.
+            DO NOT:
+            - Call multiple tools
+            - Invent availability, appointments, or data
+            - Skip the tool when an action is required
+
+            ## Available Commands
+            Use exactly these command strings:
+            - "get_appointments" → when checking existing bookings
+            - "get_availability" → when user asks for available times
+            - "book_appointment" → when user confirms a slot
+            - "create_calendar_event" → when an appointment is confirmed as booked
+            - "send_appointment_confirmation_sms" → when a user would like a confirmation text after booking
+            - "cancel_appointment" → when user wants to cancel
+            - "reschedule_appointment" → when changing an appointment
+            - "get_patient" → when you need to identify the patient based on provided info (name, phone, etc.)
+            - "upsert_patient" → when you have new patient info and want to create or update a patient record
+            - "prescription_lookup" → when user asks about prescriptions
+            - "billing_lookup" → when user has questions about billing
+            - "insurance_lookup" → when user has questions about insurance coverage
+            - "upsert_patient_insurance" → when you have new insurance info to add to a patient's record
+            - "create_task" → fallback if request is unclear or unsupported
+            - "validate_patient" → when you need to confirm a patient's identity or details
+            - "send_text" → when user wants to send a message (e.g. appointment reminder, follow-up instructions, etc.)
+
+            If unsure → use "create_task"
+
+            ## How to build query
+            The 'query' must include:
+            - User's request
+            - Any collected details (name, phone, date, reason, etc.)
+
+            Example:
+            "User wants a cleaning appointment tomorrow at 10am, name John, phone 5551234567"
 
             ## Getting Availability
             - make sure to include the reason in for the appointment in the query when checking availability
             - for example: cleaning, toothache, cavity, extraction, whitening, etc.
 
+            ## When to call tool
+            Call 'run_command' when:
+            - The user requests an action (booking, checking, canceling, etc.)
+            - You have enough information OR need backend help
+
+            DO NOT call tool when:
+            - You are still collecting required info
+            
             ## Ending
-            If user is done → say goodbye and call end_call
-""",
+            If user is done:
+            - Say goodbye
+            - Call 'end_call'
+        """,
     )
         
-       # MAIN TOOLS 
+    # MAIN TOOLS 
     
+    @function_tool()
+    async def run_command(
+        self, 
+        context: RunContext, 
+        command: str, 
+        query: str) -> str:
+        """Send a command to the n8n backend"""
+        result = send_to_n8n(command, query)
+
+        try:
+            #normalize response handling
+            if isinstance(result, dict):
+                if "result" in result:
+                    return result["result"]
+                if "results" in result and len(result["results"]) > 0:
+                    return result["results"][0].get("result", "No result returned.")
+            return "I'm sorry, something went wrong with processing you request."
+        except Exception as e:
+            logger.error(f"Tool error: {e}")
+            return "I'm sorry, I couldn't complete that request."
+
     @function_tool()
     async def get_availability(self, context: RunContext, query: str) -> str:
         """Get the office hours of the dental office."""
@@ -152,21 +217,6 @@ class DentalAssistant(Agent):
             logger.error(f"Error retrieving availability: {e}")
             return "I'm sorry, I couldn't retrieve availability right now."
     
-    @function_tool()
-    async def book_appointment(self, context: RunContext, query: str) -> str:
-        result = send_to_n8n("book_appointment", query)
-        return result.get("result", "I couldn't complete the booking.")
-
-    @function_tool()
-    async def cancel_appointment(self, context: RunContext, query: str) -> str:
-        result = send_to_n8n("cancel_appointment", query)
-        return result.get("result", "Unable to cancel appointment.")
-
-    @function_tool()
-    async def reschedule_appointment(self, context: RunContext, query: str) -> str:
-        result = send_to_n8n("reschedule_appointment", query)
-        return result.get("result", "Unable to reschedule appointment.")
-
     @function_tool()
     async def create_task(self, context: RunContext, query: str) -> str:
         result = send_to_n8n("create_task", query)
