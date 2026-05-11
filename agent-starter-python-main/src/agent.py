@@ -93,10 +93,14 @@ def send_to_n8n(
         response.raise_for_status()
         data = response.json()
 
-        # persist session_data from n8n
-        if isinstance(data, dict) and "session_data" in data:
-            session_data_store = data["session_data"]
-        print(data)
+        # persist session_data from n8n (top-level or nested inside results[0])
+        if isinstance(data, dict):
+            if "session_data" in data:
+                session_data_store = data["session_data"]
+            elif "results" in data and isinstance(data["results"], list) and data["results"]:
+                nested = data["results"][0].get("session_data")
+                if nested:
+                    session_data_store = nested
         return data
 
     except Exception as e:
@@ -144,17 +148,31 @@ class DentalAssistant(Agent):
             - "create_calendar_event" → when an appointment is confirmed as booked
             - "send_appointment_confirmation_sms" → when a user would like a confirmation text after booking
             - "cancel_appointment" → when user wants to cancel
-            - "reschedule_appointment" → when changing an appointment
+            - "reschedule_appointment" → when the patient wants to change an appointment
             - "get_patient" → when you need to identify the patient based on provided info (name, phone, etc.)
-            - "upsert_patient" → when you have new patient info and want to create or update a patient record
+            - "upsert_patient" → when you have new patient info and want to create or update a patient record 
             - "prescription_lookup" → when user asks about prescriptions
             - "billing_lookup" → when user has questions about billing
             - "insurance_lookup" → when user has questions about insurance coverage
             - "upsert_patient_insurance" → when you have new insurance info to add to a patient's record
+
+            ## Patient Identification Required
+            Before calling any of these commands, you MUST first call "get_patient" to identify the patient (unless patientid is already confirmed in the current session):
+            - "billing_lookup"
+            - "prescription_lookup"
+            - "insurance_lookup"
+            - "upsert_patient_insurance"
+            - "validate_patient"
+            - "get_appointments"
+            - "cancel_appointment"
+            - "reschedule_appointment"
+
+            If you have not yet identified the patient, collect their phone number first, then call "get_patient" before proceeding. Rely on the n8n backend to match the phone number to a patient record and return the patientid. Ensure patientid is stored in the session data for future reference.
+
             - "create_task" → fallback if request is unclear or unsupported
             - "validate_patient" → when you need to confirm a patient's identity or details
             - "send_text" → when user wants to send a message (e.g. appointment reminder, follow-up instructions, etc.)
-
+            
             If unsure → use "create_task"
 
             ## How to build query
@@ -181,6 +199,9 @@ class DentalAssistant(Agent):
             If user is done:
             - Say goodbye
             - Call 'end_call'
+
+
+
         """,
     )
         
@@ -194,9 +215,10 @@ class DentalAssistant(Agent):
         query: str) -> str:
         """Send a command to the n8n backend"""
         result = send_to_n8n(command, query)
-
+        logger.log(logging.INFO, f"Command: {command}, Query: {query}, Result: {result}")
         try:
             #normalize response handling
+            #the payload layout for the result can vary based on the command and n8n workflow
             if isinstance(result, dict):
                 if "result" in result:
                     return result["result"]
@@ -205,17 +227,10 @@ class DentalAssistant(Agent):
             return "I'm sorry, something went wrong with processing you request."
         except Exception as e:
             logger.error(f"Tool error: {e}")
+            
             return "I'm sorry, I couldn't complete that request."
 
-    @function_tool()
-    async def get_availability(self, context: RunContext, query: str) -> str:
-        """Get the office hours of the dental office."""
-        result = send_to_n8n("get_availability", query)
-        try:
-            return result["results"][0]["result"]
-        except Exception as e:
-            logger.error(f"Error retrieving availability: {e}")
-            return "I'm sorry, I couldn't retrieve availability right now."
+    
     
     @function_tool()
     async def create_task(self, context: RunContext, query: str) -> str:
@@ -275,6 +290,7 @@ async def my_agent(ctx: JobContext):
         turn_detection=MultilingualModel(),
         vad=ctx.proc.userdata["vad"],
         preemptive_generation=True,
+        max_tool_steps=10,
     )
 
     # Start the session
