@@ -116,7 +116,6 @@ export const SessionView = ({
       <Fade top className="absolute inset-x-4 top-0 z-10 h-40" />
       {/* transcript */}
       <ChatTranscript
-        hidden={!chatOpen}
         messages={messages}
         className="space-y-3 transition-opacity duration-300 ease-out"
       />

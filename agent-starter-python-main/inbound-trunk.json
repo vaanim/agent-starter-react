@@ -1,0 +1,9 @@
+{
+  "trunk": {
+    "name": "LiveKitConnection",
+    "numbers": ["+18558192895"],
+    "authUsername": "vaanim",
+    "authPassword": "loki",
+    "krispEnabled": true
+  }
+}
