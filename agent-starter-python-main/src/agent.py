@@ -28,9 +28,7 @@ logger = logging.getLogger("agent")
 
 load_dotenv(".env.local")
 
-# GLOBALS #
-session_id = ''
-session_data_store = {}
+# Session state is stored per-agent instance (see DentalAssistant) — no globals needed.
 
 N8N_URL = "https://railway.assigncorp.com/webhook/788688e1-1b30-4696-a412-f207ae52e708"
 #personal n8n_url = "https://railway.assigncorp.com/webhook/appointment-agent"
@@ -72,14 +70,18 @@ def build_call_metadata(conversation):
 def send_to_n8n(
     command: str,
     query: str | None = None,
-):
-    global session_data_store
+    *,
+    session_id: str = "",
+    session_data_store: dict | None = None,
+) -> tuple[dict, dict]:
+    """Send a command to n8n and return (response_data, updated_session_data)."""
+    store = dict(session_data_store or {})
 
     payload = {
         "command": command,
         "query": query or "",
         "sessionid": session_id,
-        "session_data": session_data_store or {}
+        "session_data": store,
     }
 
     try:
@@ -87,7 +89,7 @@ def send_to_n8n(
             N8N_URL,
             json=payload,
             headers={"Content-Type": "application/json"},
-            timeout=20
+            timeout=20,
         )
 
         response.raise_for_status()
@@ -96,23 +98,26 @@ def send_to_n8n(
         # persist session_data from n8n (top-level or nested inside results[0])
         if isinstance(data, dict):
             if "session_data" in data:
-                session_data_store = data["session_data"]
+                store = data["session_data"]
             elif "results" in data and isinstance(data["results"], list) and data["results"]:
                 nested = data["results"][0].get("session_data")
                 if nested:
-                    session_data_store = nested
-        return data
+                    store = nested
+
+        return data, store
 
     except Exception as e:
         logger.error(f"N8N error: {e}")
-        return {"status": "error", "message": "Request failed"}
+        return {"status": "error", "message": "Request failed"}, store
 
 # END HELPER METHODS #
 
 #SINGLE AGENT IMPLEMENTATION
 
 class DentalAssistant(Agent):
-    def __init__(self) -> None:
+    def __init__(self, session_id: str) -> None:
+        self._session_id = session_id
+        self._session_data: dict = {}
         super().__init__(
             instructions="""
             You are Paige, a front desk assistant for a dental office.
@@ -240,32 +245,36 @@ class DentalAssistant(Agent):
     
     @function_tool()
     async def run_command(
-        self, 
-        context: RunContext, 
-        command: str, 
-        query: str) -> str:
+        self,
+        context: RunContext,
+        command: str,
+        query: str,
+    ) -> str:
         """Send a command to the n8n backend"""
-        result = send_to_n8n(command, query)
+        result, self._session_data = send_to_n8n(
+            command, query,
+            session_id=self._session_id,
+            session_data_store=self._session_data,
+        )
         logger.log(logging.INFO, f"Command: {command}, Query: {query}, Result: {result}")
         try:
-            #normalize response handling
-            #the payload layout for the result can vary based on the command and n8n workflow
             if isinstance(result, dict):
                 if "result" in result:
                     return result["result"]
                 if "results" in result and len(result["results"]) > 0:
                     return result["results"][0].get("result", "No result returned.")
-            return "I'm sorry, something went wrong with processing you request."
+            return "I'm sorry, something went wrong with processing your request."
         except Exception as e:
             logger.error(f"Tool error: {e}")
-            
             return "I'm sorry, I couldn't complete that request."
 
-    
-    
     @function_tool()
     async def create_task(self, context: RunContext, query: str) -> str:
-        result = send_to_n8n("create_task", query)
+        result, self._session_data = send_to_n8n(
+            "create_task", query,
+            session_id=self._session_id,
+            session_data_store=self._session_data,
+        )
         return result.get("result", "I've recorded your request. Our team will follow up.")
 
     @function_tool()
@@ -289,6 +298,10 @@ def prewarm(proc: JobProcess):
 server.setup_fnc = prewarm
 
 async def on_session_end(ctx: JobContext) -> None:
+    room_name = ctx.room.name
+    agent: DentalAssistant | None = ctx.proc.userdata.pop(f"agent_{room_name}", None)
+    session_data = agent._session_data if agent else {}
+
     report = ctx.make_session_report()
     clean_conversation = extract_conversation(report.to_dict())
 
@@ -302,17 +315,19 @@ async def on_session_end(ctx: JobContext) -> None:
     logger.info(f"Transcript saved to {filename}")
 
     send_to_n8n(
-        command="end-of-call-report",
-        query="Call ended"
+        "end-of-call-report",
+        "Call ended",
+        session_id=room_name,
+        session_data_store=session_data,
     )
 
 @server.rtc_session(agent_name="my-agent", on_session_end=on_session_end)
 
 async def my_agent(ctx: JobContext):
-    global session_id, session_data_store
+    room_name = ctx.room.name
 
-    session_id = ctx.room.name
-    session_data_store = {}  # reset per call
+    agent = DentalAssistant(session_id=room_name)
+    ctx.proc.userdata[f"agent_{room_name}"] = agent
 
     session = AgentSession(
         stt=assemblyai.STT(),
@@ -326,7 +341,7 @@ async def my_agent(ctx: JobContext):
 
     # Start the session
     await session.start(
-        agent=DentalAssistant(),
+        agent=agent,
         room=ctx.room,
         room_options=room_io.RoomOptions(
             audio_input=room_io.AudioInputOptions(
